@@ -7,7 +7,7 @@
 ! L1EXPR  = L2EXPR (L2OPR L2EXPR)*
 ! L2EXPR  = L3OPR? L3EXPR
 ! L3EXPR  = L4EXPR (L4OPR L4EXPR)?
-! L4EXPR  = L4OPR? L5EXPR (L5OPR L5EXPR)*
+! L4EXPR  = L5OPR? L5EXPR (L5OPR L5EXPR)*
 ! L5EXPR  = L6EXPR (L6OPR L6EXPR)*
 ! L6EXPR  = term (L7OPR L6EXPR)*
 ! term    = func / brt / var / num
@@ -71,6 +71,7 @@ module m_rvm
         integer, dimension(ILEN) :: code = 0
         
         integer                  :: next = 1  ! next position to parse
+
     end type t_parse_result
 
     type :: t_parser
@@ -104,6 +105,7 @@ module m_rvm
                           err_opr       = p_error-7, &
                           err_eof       = p_error-8, &
                           err_noterm    = p_error-9, &
+                          err_ill_expr  = p_error-10, &
                           err_runtime   = p_error-9999
 
     ! runtime instructions
@@ -176,10 +178,6 @@ module m_rvm
 
    type(t_buildin), dimension(NUM_OPRS), parameter :: operators = (/ op_noop, op_or, op_and, op_not, op_le, op_lt, &
        op_ge, op_gt, op_eq, op_ne, op_plus, op_minus, op_mul, op_div, op_mod, op_pow /)
-
-
-
-
 
 
     interface setup
@@ -272,15 +270,30 @@ module m_rvm
     end function
     
 !----------------------------------------------------------------------------------------------------------
+! (re)initialize t_parse_result
+!----------------------------------------------------------------------------------------------------------
+    subroutine reset_parse_result (this, stat)
+        implicit none
+        type(t_parser) :: this
+        type(t_parse_result) :: stat
+
+        this%rp = 1 + NUM_CONSTANT + this%nvar
+        this%pp = 1
+        this%ip = 0
+
+        stat%code = 0
+        stat%next = 1
+    end subroutine
+
+!----------------------------------------------------------------------------------------------------------
 ! record the parsing result
 !----------------------------------------------------------------------------------------------------------
-    subroutine write_stat( this, stat, next, co )
+    subroutine write_stat( this, stat, co )
         implicit none
         type(t_parser),        intent (inout) :: this
         type(t_parse_result),  intent (inout) :: stat
-        integer,               intent (in)    :: next ! next: next position to parse
         integer, dimension(:), intent (in)    :: co  ! instruction to record
-        stat%next = next
+        stat%next = this%pp
         stat%code(1:size(co)) = co
         if (co(1) > flag_failed) then
             !this%reg_parse_link(:, this%rp) = (/ level, this%pp /)
@@ -348,7 +361,7 @@ module m_rvm
                         !call handle_error(this, this%memo(level, this%pp)%code, (/ err_opr, this%pp /), trim(opr(i)%name) )
                         call handle_error(this, stat%code, (/ err_opr, this%pp /), trim(opr(i)%name) )
                     else                                ! we match the pattern successfully
-                        call write_stat( this, stat, rstat%next, (/ opr(i)%id, this%rp, lstat%code(2), rstat%code(2) /))
+                        call write_stat( this, stat, (/ opr(i)%id, this%rp, lstat%code(2), rstat%code(2) /))
                         if (DEBUG) print*, 'matched "', this%expr(pp:this%pp-1), '", instruction =', stat%code(1:4), stat%next
                         lstat = stat
                     endif
@@ -396,9 +409,9 @@ module m_rvm
                 call handle_error( this, stat%code, (/ err_opr, pp /), trim(opr(i)%name) )
             else
                 if (present(opr_reg)) then
-                    call write_stat( this, stat, stat%next, (/ opr_reg(i)%id, this%rp, stat%code(2) /))
+                    call write_stat( this, stat, (/ opr_reg(i)%id, this%rp, stat%code(2) /))
                 else
-                    call write_stat( this, stat, stat%next, (/ opr(i)%id, this%rp, stat%code(2) /))
+                    call write_stat( this, stat, (/ opr(i)%id, this%rp, stat%code(2) /))
                 endif
                 if (DEBUG) print*, 'matched "', this%expr(pp:this%pp-1), '", instruction =', stat%code(1:3), stat%next
             endif
@@ -515,11 +528,11 @@ module m_rvm
             endif
         enddo
         if (found) then
-            call write_stat( this, stat, pp+1, (/ flag_load, i /))
             this%pp = pp + 1
+            call write_stat( this, stat, (/ flag_load, i /))
             if (DEBUG) print*, 'matched variable "', trim(this%var_name(i)), '", next pos = ', this%pp
         else
-            call write_stat( this, stat, this%pp, (/ flag_failed /))
+            call write_stat( this, stat, (/ flag_failed /))
         endif
     end subroutine
 
@@ -548,11 +561,10 @@ module m_rvm
                         call handle_error(this, stat%code, (/err_num, pp/))
                     else
                         deci = .true.
-                        if ( '0' > this%expr(pp-1:pp-1) .or. &
-                                this%expr(pp-1:pp-1) > '9') then 
-                            if ( '0' > this%expr(pp+1:pp+1) .or. &
-                                    this%expr(pp+1:pp+1) > '9') then 
-                                ! no digit around '.', raise error
+                        c = this%expr(pp-1:pp-1)
+                        if ( '0' > c .or. c > '9' .or. c == '+' .or. c == '-' ) then
+                            if ( '0' > this%expr(pp+1:pp+1) .or.  this%expr(pp+1:pp+1) > '9') then
+                                ! no digit around '.' or no digit after '-.' / '+.', raise error
                                 call handle_error(this, stat%code, (/err_num, pp/))
                             endif
                             pp = pp + 1
@@ -561,7 +573,7 @@ module m_rvm
                 else if (c == 'e' .or. c == 'd') then
                     if (expo .eqv. .false.) then
                         expo = .true.
-                        ! look at next one or position
+                        ! look at next position
                         if (scan(this%expr(pp+1:pp+1), '+-') > 0) then
                             if (scan(this%expr(pp+2:pp+2), '0123456789') > 0) then
                                 pp = pp + 2
@@ -587,10 +599,10 @@ module m_rvm
             read(this%expr(this%pp:pp-1), *) val
             this%reg_parse(this%rp) = real(val, p_k_parse)
             !---------------- mixing parsing and compiling codes ------------------
-            call write_stat( this, stat, pp, (/ flag_load, this%rp, this%pp /))
             this%pp = pp  ! update current pos
+            call write_stat( this, stat, (/ flag_load, this%rp, this%pp /))
         else  ! not a number
-            call write_stat( this, stat, this%pp, (/ flag_failed /))
+            call write_stat( this, stat, (/ flag_failed /))
         endif
     end subroutine
 
@@ -674,11 +686,11 @@ module m_rvm
 
                 ! matched, record instructions
                 this%pp = this%pp + 1  ! consume ')'
-                call write_stat( this, stat, this%pp, (/ functions(j)%id, this%rp, mo(1:np) /))
+                call write_stat( this, stat, (/ functions(j)%id, this%rp, mo(1:np) /))
                 if (DEBUG) print*, 'matched function "', this%expr(pp:this%pp-1), '" instruction = ', stat%code(1:np+2) 
             endif
         else
-            call write_stat( this, stat, this%pp, (/ flag_failed /))
+            call write_stat( this, stat, (/ flag_failed /))
         endif
     end subroutine
 
@@ -694,7 +706,7 @@ module m_rvm
         integer :: pp
         pp = this%pp
         if (this%expr(pp:pp) /= '(') then
-            call write_stat( this, stat, pp, (/ flag_failed /))
+            call write_stat( this, stat, (/ flag_failed /))
             return
         endif
 
@@ -704,11 +716,11 @@ module m_rvm
 
         if (this%expr(this%pp:this%pp) /= ')') call handle_error(this, stat%code, (/err_brt_mtch, this%pp/))
 
-        call write_stat( this, stat, this%pp, (/ op_noop%id, stat%code(2) /) )
+        this%pp = this%pp + 1  ! consume ')'
+
+        call write_stat( this, stat, (/ op_noop%id, stat%code(2) /) )
 
         if (DEBUG_VERBOSE) print*, 'matched parentheses "', this%expr(pp:this%pp), '"'
-
-        this%pp = this%pp + 1  ! consume ')'
 
     end subroutine
 
@@ -725,7 +737,7 @@ module m_rvm
         do i = 1, NUM_CONSTANT
             if ( trim(constants(i)%name) == this%expr( this%pp: this%pp + len_trim( constants(i)%name )-1 ) ) then
                 this%pp = this%pp + len_trim(constants(i)%name) ! consume constant
-                call write_stat( this, stat, this%pp, (/ flag_load, i + this%nvar /))
+                call write_stat( this, stat, (/ flag_load, i + this%nvar /))
                 if (DEBUG) print*, 'matched constant "', this%expr(this%pp - len_trim(constants(i)%name): this%pp-1), '"'
                 exit
             endif
@@ -753,9 +765,8 @@ module m_rvm
         do i = 1, this%nvar
             this%var_name(i) = varname(i)
         enddo
-        this%rp = 1 + NUM_CONSTANT + this%nvar
-        this%pp = 1
-        this%ip = 0
+
+        call reset_parse_result(this, stat)
 
         allocate (this%inst_parse(ILEN, this%slen))
         allocate (this%reg_parse(this%slen/2+1 + this%rp))
@@ -774,9 +785,21 @@ module m_rvm
         type(t_parse_result), intent (out) :: stat
         
         !local
+        integer :: pp
         if (DEBUG) print*, 'parsing ', trim(this%expr)
         call l4expr(this, stat)
-        if (stat%next < len_trim(this%expr)) call handle_error(this, stat%code, (/err_eof, stat%next/))
+        if (stat%next <= len_trim(this%expr)) then
+            if (stat%next < len_trim(this%expr)) then
+                pp = this%pp
+                ! see if the expression is L0EXPR ~ L3EXPR (aka comparing statements)
+                call reset_parse_result(this, stat)
+                call l0expr(this, stat)
+                ! l0expr return without error, we have a comparing statement
+                if (stat%next > len_trim(this%expr)) &
+                    &  call handle_error(this, stat%code, (/err_ill_expr, pp/))
+            endif
+            call handle_error(this, stat%code, (/err_eof, stat%next/))
+        endif
     end subroutine parse
 
 !----------------------------------------------------------------------------------------------------------
@@ -1114,6 +1137,8 @@ module m_rvm
                 print*, 'Invalid number'
             case ( err_eof )
                 print*, 'Parser does not consume all characters'
+            case ( err_ill_expr )
+                print*, 'Illegal expression: result must be a number'
             case ( err_noterm )
                 print*, 'No terminal term found'
             case ( err_runtime )

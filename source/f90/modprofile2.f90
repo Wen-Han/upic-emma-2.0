@@ -54,7 +54,7 @@ subroutine getdensity1d(expr, varname, edges, dx, nx, npx, sr, x)
     i = 1
     do while (.true.)
         if (qlow < qx) then
-            if ( i <= gppe ) then
+            if ( i < gppe ) then
                 qlow = qlow + 0.5 * (pcharge(i) + pcharge(i+1))
             else
                 exit
